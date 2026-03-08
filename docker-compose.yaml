@@ -1,33 +1,57 @@
-version: '3'
+version: '3.9'
 
 services:
 
   postgres:
     image: postgres:15
+    container_name: postgres_db
+    restart: always
     environment:
       POSTGRES_USER: shop
       POSTGRES_PASSWORD: shop
       POSTGRES_DB: ecommerce
     ports:
       - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
 
   mariadb:
     image: mariadb:11
+    container_name: mariadb_db
+    restart: always
     environment:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: ecommerce
     ports:
       - "3306:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./mariadb/init.sql:/docker-entrypoint-initdb.d/init.sql
 
   mongodb:
     image: mongo:7
+    container_name: mongo_db
+    restart: always
     ports:
       - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
 
   neo4j:
     image: neo4j:5
+    container_name: neo4j_db
+    restart: always
     environment:
       NEO4J_AUTH: neo4j/password
     ports:
       - "7474:7474"
       - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+
+volumes:
+  postgres_data:
+  mariadb_data:
+  mongo_data:
+  neo4j_data:
