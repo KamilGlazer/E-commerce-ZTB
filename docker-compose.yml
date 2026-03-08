@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  postgresdb:
+    image: postgres:15
+    container_name: ztb_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ecom_user
+      POSTGRES_PASSWORD: ecom_password
+      POSTGRES_DB: ecommerce
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./init-scripts/postgres:/docker-entrypoint-initdb.d
+
+  mariadb:
+    image: mariadb:11
+    container_name: ztb_mariadb
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: ecommerce
+      MYSQL_USER: ecom_user
+      MYSQL_PASSWORD: ecom_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./data/mariadb:/var/lib/mysql
+      - ./init-scripts/mariadb:/docker-entrypoint-initdb.d
+
+  mongodb:
+    image: mongo:7
+    container_name: ztb_mongo
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ecom_user
+      MONGO_INITDB_ROOT_PASSWORD: ecom_password
+      MONGO_INITDB_DATABASE: ecommerce
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./data/mongo:/data/db
+      - ./init-scripts/mongo:/docker-entrypoint-initdb.d
+
+  neo4j:
+    image: neo4j:5
+    container_name: ztb_neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/ecom_password
+    ports:
+      - "7474:7474"   # HTTP browser
+      - "7687:7687"   # Bolt protocol
+    volumes:
+      - ./data/neo4j/data:/data
+      - ./data/neo4j/logs:/logs
+      - ./init-scripts/neo4j:/var/lib/neo4j/import

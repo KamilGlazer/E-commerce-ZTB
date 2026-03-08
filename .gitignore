@@ -1,0 +1,5 @@
+# Ignoruj rzeczywiste dane baz danych!
+# Trzymanie takich ilości danych binarhnych (szczególnie 1M rekordów) w repozytorium Git to zła praktyka.
+# Będzie spowalniać repozytorium i prowadzić do konfliktów. 
+# Zamiast tego, skrypty generujące (tzw. seedery) oraz docker-compose powinny być w Gicie.
+data/
