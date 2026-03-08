@@ -1,0 +1,10 @@
+CREATE TABLE users (id SERIAL PRIMARY KEY, username VARCHAR(50), email VARCHAR(100), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE categories (id SERIAL PRIMARY KEY, name VARCHAR(100), description TEXT);
+CREATE TABLE products (id SERIAL PRIMARY KEY, category_id INT REFERENCES categories(id), name VARCHAR(100), price DECIMAL(10,2), stock INT);
+CREATE TABLE orders (id SERIAL PRIMARY KEY, user_id INT REFERENCES users(id), status VARCHAR(20), total_amount DECIMAL(10,2), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE order_items (id SERIAL PRIMARY KEY, order_id INT REFERENCES orders(id), product_id INT REFERENCES products(id), quantity INT, unit_price DECIMAL(10,2));
+CREATE TABLE reviews (id SERIAL PRIMARY KEY, product_id INT REFERENCES products(id), user_id INT REFERENCES users(id), rating INT, comment TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE carts (id SERIAL PRIMARY KEY, user_id INT REFERENCES users(id), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE cart_items (id SERIAL PRIMARY KEY, cart_id INT REFERENCES carts(id), product_id INT REFERENCES products(id), quantity INT);
+CREATE TABLE payments (id SERIAL PRIMARY KEY, order_id INT REFERENCES orders(id), amount DECIMAL(10,2), method VARCHAR(50), status VARCHAR(20), payment_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE shipments (id SERIAL PRIMARY KEY, order_id INT REFERENCES orders(id), tracking_number VARCHAR(100), carrier VARCHAR(50), status VARCHAR(20));
