@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Benchmark baz — E-commerce ZTB</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --border: #2d3a4d;
+      --text: #e7ecf3;
+      --muted: #8b9bb4;
+      --accent: #3d8bfd;
+      --accent-dim: #2a5fad;
+      --ok: #3ecf8e;
+      --err: #f07178;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: radial-gradient(1200px 800px at 10% -10%, #1a2744 0%, var(--bg) 55%);
+      color: var(--text);
+      line-height: 1.45;
+      min-height: 100vh;
+    }
+    .wrap {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 2rem 1.25rem 3rem;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin: 0 0 0.35rem;
+      letter-spacing: -0.02em;
+    }
+    .subtitle { color: var(--muted); font-size: 0.92rem; margin-bottom: 1.75rem; }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.25rem 1.35rem;
+      margin-bottom: 1.25rem;
+    }
+    section h2 {
+      margin: 0 0 1rem;
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    label { display: block; font-size: 0.88rem; color: var(--muted); margin-bottom: 0.35rem; }
+    select.seed-size-select {
+      width: 100%;
+      max-width: 420px;
+      padding: 0.55rem 0.65rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #131b27;
+      color: var(--text);
+      font-size: 0.95rem;
+    }
+    .row-actions { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: flex-end; margin-top: 0.85rem; }
+    button.primary {
+      padding: 0.55rem 1.15rem;
+      border: none;
+      border-radius: 8px;
+      background: linear-gradient(180deg, var(--accent) 0%, var(--accent-dim) 100%);
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+    button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.primary:not(:disabled):hover { filter: brightness(1.08); }
+    .hint {
+      margin-top: 0.85rem;
+      font-size: 0.82rem;
+      color: var(--muted);
+      border-left: 3px solid var(--border);
+      padding-left: 0.75rem;
+    }
+    .engine-rows { display: flex; flex-direction: column; gap: 0.65rem; }
+    .engine-row {
+      display: grid;
+      grid-template-columns: 140px 1fr auto auto;
+      gap: 0.65rem;
+      align-items: center;
+      padding: 0.65rem 0.75rem;
+      background: #131b27;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+    }
+    @media (max-width: 720px) {
+      .engine-row {
+        grid-template-columns: 1fr;
+      }
+      .engine-row .dbname { margin-bottom: 0.25rem; }
+    }
+    .dbname { font-weight: 600; font-size: 0.92rem; }
+    select {
+      width: 100%;
+      padding: 0.5rem 0.65rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #0f1419;
+      color: var(--text);
+      font-size: 0.85rem;
+    }
+    button.run-one {
+      padding: 0.45rem 0.85rem;
+      border-radius: 8px;
+      border: 1px solid var(--accent-dim);
+      background: transparent;
+      color: var(--accent);
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 0.82rem;
+      white-space: nowrap;
+    }
+    button.run-one:disabled { opacity: 0.4; cursor: not-allowed; }
+    .timer {
+      font-variant-numeric: tabular-nums;
+      font-size: 0.88rem;
+      color: var(--muted);
+      min-width: 7rem;
+      text-align: right;
+    }
+    .timer strong { color: var(--ok); font-weight: 600; }
+    .timer.err strong { color: var(--err); }
+    #seed-status { margin-top: 0.75rem; font-size: 0.88rem; }
+    #seed-status.ok { color: var(--ok); }
+    #seed-status.err { color: var(--err); }
+    #seed-status.work { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Benchmark odczytów — 4 bazy</h1>
+    <p class="subtitle">
+      Wybierz profil <strong>size</strong> (<code>small</code> / <code>medium</code> / <code>large</code>) zgodnie ze słownikiem <code>SIZES</code> w <code>seed.py</code>.
+      Przed kolejnym pełnym zasiewem na czystych danych wyczyść wolumeny (np. <code>docker-compose down -v</code> i folder <code>data/</code>).
+    </p>
+
+    <section>
+      <h2>Generowanie danych</h2>
+      <label for="seed-size">Profil wielkości (size)</label>
+      <select id="seed-size" class="seed-size-select"></select>
+      <div class="row-actions">
+        <button type="button" class="primary" id="btn-seed">Wygeneruj dane we wszystkich bazach</button>
+      </div>
+      <p class="hint">Profil <strong>large</strong> ma znacznie więcej wierszy — nie zamykaj karty przeglądarki do czasu odpowiedzi serwera.</p>
+      <div id="seed-status"></div>
+    </section>
+
+    <section>
+      <h2>Zapytania testowe + czas odczytu</h2>
+      <div class="engine-rows" id="engine-rows"></div>
+    </section>
+  </div>
+
+  <script>
+    const API = "";
+
+    async function fetchMeta() {
+      const res = await fetch(API + "/api/meta");
+      if (!res.ok) throw new Error("/meta: " + res.status);
+      return res.json();
+    }
+
+    function setSeedStatus(kind, msg) {
+      const el = document.getElementById("seed-status");
+      el.className = kind;
+      el.textContent = msg || "";
+    }
+
+    function renderSizeOptions(sizes) {
+      const sel = document.getElementById("seed-size");
+      sel.innerHTML = "";
+      sizes.forEach((s) => {
+        const opt = document.createElement("option");
+        opt.value = s.id;
+        opt.textContent = s.label;
+        sel.appendChild(opt);
+      });
+    }
+
+    function rowTimerEl(row) {
+      return row.querySelector(".timer");
+    }
+
+    async function runEngine(engine, row) {
+      const sel = row.querySelector("select");
+      const btn = row.querySelector("button.run-one");
+      const qid = sel.value;
+      const timerEl = rowTimerEl(row);
+      btn.disabled = true;
+      timerEl.innerHTML = "…";
+      timerEl.classList.remove("err");
+      try {
+        const res = await fetch(API + "/api/run/" + encodeURIComponent(engine), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query_id: qid }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || res.statusText);
+        timerEl.innerHTML =
+          "<strong>" + data.elapsed_ms + " ms</strong> · wierszy: " + data.row_count;
+      } catch (e) {
+        timerEl.classList.add("err");
+        timerEl.innerHTML = "<strong>Błąd</strong> · " + (e.message || e);
+      }
+      btn.disabled = false;
+    }
+
+    function buildRow(meta, engine) {
+      const queries = meta.queries_by_engine[engine] || [];
+      const div = document.createElement("div");
+      div.className = "engine-row";
+      div.dataset.engine = engine;
+      div.innerHTML =
+        '<div class="dbname"></div>' +
+        '<select></select>' +
+        '<button type="button" class="run-one">Uruchom</button>' +
+        '<div class="timer">—</div>';
+      div.querySelector(".dbname").textContent = meta.engines.find((e) => e.id === engine).label;
+
+      const sel = div.querySelector("select");
+      queries.forEach((q) => {
+        const opt = document.createElement("option");
+        opt.value = q.id;
+        opt.textContent = q.label;
+        sel.appendChild(opt);
+      });
+
+      div.querySelector("button.run-one").addEventListener("click", () => runEngine(engine, div));
+      return div;
+    }
+
+    (async () => {
+      try {
+        const meta = await fetchMeta();
+        renderSizeOptions(meta.sizes || []);
+        const host = document.getElementById("engine-rows");
+        host.innerHTML = "";
+        meta.engines.forEach((e) => host.appendChild(buildRow(meta, e.id)));
+
+        document.getElementById("btn-seed").addEventListener("click", async () => {
+          const size = document.getElementById("seed-size").value;
+          if (!size) {
+            setSeedStatus("err", "Wybierz profil size.");
+            return;
+          }
+          const btn = document.getElementById("btn-seed");
+          btn.disabled = true;
+          setSeedStatus("work", "Generowanie danych — proszę czekać…");
+          try {
+            const res = await fetch(API + "/api/seed", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ size }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail) || res.statusText);
+            setSeedStatus(
+              "ok",
+              data.message +
+                " Produkty: " +
+                data.cfg.products +
+                ", zamówienia: " +
+                data.cfg.orders +
+                ", …"
+            );
+          } catch (e) {
+            setSeedStatus("err", String(e.message || e));
+          }
+          btn.disabled = false;
+        });
+      } catch (e) {
+        document.getElementById("engine-rows").innerHTML =
+          '<p style="color:var(--err)">Nie udało się połączyć z API. Uruchom serwer: <code>uvicorn benchmark_server:app --host 127.0.0.1 --port 8765</code></p>';
+      }
+    })();
+  </script>
+</body>
+</html>

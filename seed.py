@@ -118,6 +118,82 @@ def setup_neo4j_constraints(driver):
         for label in labels:
             session.run(f"CREATE CONSTRAINT IF NOT EXISTS FOR (n:{label}) REQUIRE n.id IS UNIQUE")
 
+def build_cfg_from_product_count(n: int) -> dict:
+    """Skaluje wolumeny tabel względem profilu „small” (N=10k produktów)."""
+    if n < 1:
+        raise ValueError("Liczba produktów (N) musi być >= 1")
+    categories = max(1, (n + 19) // 20)
+    return {
+        "users": max(1, 4 * n),
+        "categories": categories,
+        "products": n,
+        "orders": 8 * n,
+        "order_items": 15 * n,
+        "reviews": 3 * n,
+        "carts": 2 * n,
+        "cart_items": 5 * n,
+        "payments": 6 * n,
+        "shipments": max(1, int(5.95 * n)),
+    }
+
+
+def run_seed(cfg: dict) -> None:
+    """Wypełnia wszystkie bazy zgodnie ze słownikiem cfg (jak SIZES lub z build_cfg_from_product_count)."""
+    pg_conn, maria_conn, mongo_db, neo4j_driver = get_db_connections()
+
+    try:
+        setup_neo4j_constraints(neo4j_driver)
+
+        seed_table("users", cfg["users"], lambda s, e: gen_users(s, e),
+                   ["id", "username", "email", "created_at"], [],
+                   pg_conn, maria_conn, mongo_db, neo4j_driver, "User")
+
+        seed_table("categories", cfg["categories"], lambda s, e: gen_categories(s, e),
+                   ["id", "name", "description"], [],
+                   pg_conn, maria_conn, mongo_db, neo4j_driver, "Category")
+
+        seed_table("products", cfg["products"], lambda s, e, cat: gen_products(s, e, cat),
+                   ["id", "category_id", "name", "price", "stock"], [cfg["categories"]],
+                   pg_conn, maria_conn, mongo_db, neo4j_driver, "Product")
+
+        seed_table("orders", cfg["orders"], lambda s, e, u: gen_orders(s, e, u),
+                   ["id", "user_id", "status", "total_amount", "created_at"], [cfg["users"]],
+                   pg_conn, maria_conn, mongo_db, neo4j_driver, "Order")
+
+        seed_table("order_items", cfg["order_items"], lambda s, e, o, p: gen_order_items(s, e, o, p),
+                   ["id", "order_id", "product_id", "quantity", "unit_price"], [cfg["orders"], cfg["products"]],
+                   pg_conn, maria_conn, mongo_db, neo4j_driver, "OrderItem")
+
+        seed_table("reviews", cfg["reviews"], lambda s, e, p, u: gen_reviews(s, e, p, u),
+                   ["id", "product_id", "user_id", "rating", "comment", "created_at"], [cfg["products"], cfg["users"]],
+                   pg_conn, maria_conn, mongo_db, neo4j_driver, "Review")
+
+        seed_table("carts", cfg["carts"], lambda s, e, u: gen_carts(s, e, u),
+                   ["id", "user_id", "created_at"], [cfg["users"]],
+                   pg_conn, maria_conn, mongo_db, neo4j_driver, "Cart")
+
+        seed_table("cart_items", cfg["cart_items"], lambda s, e, c, p: gen_cart_items(s, e, c, p),
+                   ["id", "cart_id", "product_id", "quantity"], [cfg["carts"], cfg["products"]],
+                   pg_conn, maria_conn, mongo_db, neo4j_driver, "CartItem")
+
+        seed_table("payments", cfg["payments"], lambda s, e, o: gen_payments(s, e, o),
+                   ["id", "order_id", "amount", "method", "status", "payment_date"], [cfg["orders"]],
+                   pg_conn, maria_conn, mongo_db, neo4j_driver, "Payment")
+
+        seed_table("shipments", cfg["shipments"], lambda s, e, o: gen_shipments(s, e, o),
+                   ["id", "order_id", "tracking_number", "carrier", "status"], [cfg["orders"]],
+                   pg_conn, maria_conn, mongo_db, neo4j_driver, "Shipment")
+
+        build_neo4j_relations(neo4j_driver)
+
+        print("\nSukces! Dane wprowadzono do wszystkich baz.")
+
+    finally:
+        pg_conn.close()
+        maria_conn.close()
+        neo4j_driver.close()
+
+
 def build_neo4j_relations(driver):
     print("Budowanie relacji w Neo4j (wymaga Neo4j 4.4+ dla transakcji wsadowych)...")
     # Zastosowano CALL {} IN TRANSACTIONS, aby zapobiec wyczerpaniu pamięci RAM
@@ -157,80 +233,26 @@ def seed_table(name, total_rows, generator_func, columns, dependencies, pg_conn,
 
 def get_args():
     parser = argparse.ArgumentParser(description="Seed bazy danych e-commerce")
-    parser.add_argument("--size", choices=['small', 'medium', 'large'], required=True, help="Wybierz profil wielkości danych")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--size", choices=['small', 'medium', 'large'], help="Gotowy profil wielkości danych")
+    group.add_argument("--n", type=int, metavar="N", help="Docelowa liczba produktów; pozostałe tabele skalują się jak profil small (N=10k)")
     return parser.parse_args()
+
 
 def main():
     args = get_args()
-    print(f"Rozpoczynanie generowania danych. Profil: {args.size.upper()}")
-    
-    cfg = SIZES[args.size]
-    pg_conn, maria_conn, mongo_db, neo4j_driver = get_db_connections()
+    if args.size:
+        cfg = SIZES[args.size]
+        print(f"Rozpoczynanie generowania danych. Profil: {args.size.upper()}")
+    else:
+        cfg = build_cfg_from_product_count(args.n)
+        print(f"Rozpoczynanie generowania danych. N (produkty) = {args.n}")
 
     try:
-        # Wymuszenie założenia indeksów w Neo4j przed wrzuceniem danych
-        setup_neo4j_constraints(neo4j_driver)
-
-        # 1. Users
-        seed_table("users", cfg["users"], lambda s, e: gen_users(s, e), 
-                   ["id", "username", "email", "created_at"], [], 
-                   pg_conn, maria_conn, mongo_db, neo4j_driver, "User")
-                   
-        # 2. Categories
-        seed_table("categories", cfg["categories"], lambda s, e: gen_categories(s, e), 
-                   ["id", "name", "description"], [], 
-                   pg_conn, maria_conn, mongo_db, neo4j_driver, "Category")
-                   
-        # 3. Products
-        seed_table("products", cfg["products"], lambda s, e, cat: gen_products(s, e, cat), 
-                   ["id", "category_id", "name", "price", "stock"], [cfg["categories"]], 
-                   pg_conn, maria_conn, mongo_db, neo4j_driver, "Product")
-                   
-        # 4. Orders
-        seed_table("orders", cfg["orders"], lambda s, e, u: gen_orders(s, e, u), 
-                   ["id", "user_id", "status", "total_amount", "created_at"], [cfg["users"]], 
-                   pg_conn, maria_conn, mongo_db, neo4j_driver, "Order")
-                   
-        # 5. OrderItems
-        seed_table("order_items", cfg["order_items"], lambda s, e, o, p: gen_order_items(s, e, o, p), 
-                   ["id", "order_id", "product_id", "quantity", "unit_price"], [cfg["orders"], cfg["products"]], 
-                   pg_conn, maria_conn, mongo_db, neo4j_driver, "OrderItem")
-                   
-        # 6. Reviews
-        seed_table("reviews", cfg["reviews"], lambda s, e, p, u: gen_reviews(s, e, p, u), 
-                   ["id", "product_id", "user_id", "rating", "comment", "created_at"], [cfg["products"], cfg["users"]], 
-                   pg_conn, maria_conn, mongo_db, neo4j_driver, "Review")
-                   
-        # 7. Carts
-        seed_table("carts", cfg["carts"], lambda s, e, u: gen_carts(s, e, u), 
-                   ["id", "user_id", "created_at"], [cfg["users"]], 
-                   pg_conn, maria_conn, mongo_db, neo4j_driver, "Cart")
-                   
-        # 8. CartItems
-        seed_table("cart_items", cfg["cart_items"], lambda s, e, c, p: gen_cart_items(s, e, c, p), 
-                   ["id", "cart_id", "product_id", "quantity"], [cfg["carts"], cfg["products"]], 
-                   pg_conn, maria_conn, mongo_db, neo4j_driver, "CartItem")
-                   
-        # 9. Payments
-        seed_table("payments", cfg["payments"], lambda s, e, o: gen_payments(s, e, o), 
-                   ["id", "order_id", "amount", "method", "status", "payment_date"], [cfg["orders"]], 
-                   pg_conn, maria_conn, mongo_db, neo4j_driver, "Payment")
-                   
-        # 10. Shipments
-        seed_table("shipments", cfg["shipments"], lambda s, e, o: gen_shipments(s, e, o), 
-                   ["id", "order_id", "tracking_number", "carrier", "status"], [cfg["orders"]], 
-                   pg_conn, maria_conn, mongo_db, neo4j_driver, "Shipment")
-
-        build_neo4j_relations(neo4j_driver)
-
-        print("\nSukces! Dane wprowadzono do wszystkich baz.")
-
+        run_seed(cfg)
     except Exception as e:
         print(f"Wystąpił błąd: {e}")
-    finally:
-        pg_conn.close()
-        maria_conn.close()
-        neo4j_driver.close()
+
 
 if __name__ == "__main__":
     main()
