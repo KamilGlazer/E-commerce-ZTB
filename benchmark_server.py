@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from collections.abc import Sized
 from typing import Any, Callable, Literal
 
 import pg8000.dbapi
@@ -42,178 +43,42 @@ class RunQueryRequest(BaseModel):
     query_id: str
 
 
-# --- Zapytania: ten sam zestaw pomysłów, dopasowany do każdego silnika ---
-SQL_DEFINITIONS: list[tuple[str, str, str]] = [
-    (
-        "count_products",
-        "Liczba produktów",
-        "SELECT COUNT(*) AS c FROM products",
-    ),
-    (
-        "scan_orders",
-        "Skan: 50k zamówień (LIMIT)",
-        "SELECT id, user_id, status, total_amount FROM orders ORDER BY id LIMIT 50000",
-    ),
-    (
-        "join_orders_users",
-        "JOIN: zamówienia + użytkownicy (10k wierszy)",
-        """
-        SELECT o.id AS order_id, o.status, u.username, u.email
-        FROM orders o
-        JOIN users u ON o.user_id = u.id
-        ORDER BY o.id
-        LIMIT 10000
-        """,
-    ),
-    (
-        "aggregate_orders_status",
-        "Agregacja: zamówienia wg statusu",
-        """
-        SELECT status, COUNT(*) AS cnt, AVG(total_amount) AS avg_total
-        FROM orders
-        GROUP BY status
-        """,
-    ),
-    (
-        "join_review_product",
-        "JOIN: recenzje + produkty (top 5k)",
-        """
-        SELECT r.id AS review_id, r.rating, p.name AS product_name, p.price
-        FROM reviews r
-        JOIN products p ON r.product_id = p.id
-        ORDER BY r.id
-        LIMIT 5000
-        """,
-    ),
+SCENARIO_LABELS: list[tuple[str, str]] = [
+    ("C1", "Create: masowy insert użytkowników"),
+    ("C2", "Create: zamówienie + pozycje (transakcja)"),
+    ("C3", "Create: recenzje powiązane z user+product"),
+    ("C4", "Create: koszyk + pozycje koszyka"),
+    ("C5", "Create: płatność + wysyłka"),
+    ("C6", "Create: konflikt klucza (obsługa błędu)"),
+    ("R1", "Read: lookup produktu po ID"),
+    ("R2", "Read: odczyt zamówień po user_id"),
+    ("R3", "Read: orders + users + payments"),
+    ("R4", "Read: agregacja status/metoda płatności"),
+    ("R5", "Read: paginacja produktów (sort + limit)"),
+    ("R6", "Read: ścieżka klient -> zamówienie -> produkt"),
+    ("U1", "Update: zmiana stock produktów"),
+    ("U2", "Update: status PENDING -> SHIPPED"),
+    ("U3", "Update: podbicie cen kategorii"),
+    ("U4", "Update: modyfikacja recenzji"),
+    ("U5", "Update: retry płatności FAILED -> SUCCESS"),
+    ("U6", "Update: wielokrotna zmiana statusu jednego zamówienia"),
+    ("D1", "Delete: koszyk i pozycje koszyka"),
+    ("D2", "Delete: usuwanie recenzji po dacie"),
+    ("D3", "Delete: usuwanie zamówień CANCELLED"),
+    ("D4", "Delete: usunięcie użytkownika i zależności"),
+    ("D5", "Delete: konflikt FK przy usuwaniu produktu"),
+    ("D6", "Delete: soft+hard delete produktów"),
 ]
-
-MONGO_PIPELINES: dict[str, tuple[str, list[dict[str, Any]]]] = {
-    "count_products": (
-        "Liczba dokumentów w products",
-        [{"$count": "c"}],
-    ),
-    "scan_orders": (
-        "Skan: 50k zamówień",
-        [
-            {"$project": {"_id": 0, "id": 1, "user_id": 1, "status": 1, "total_amount": 1}},
-            {"$sort": {"id": 1}},
-            {"$limit": 50000},
-        ],
-    ),
-    "join_orders_users": (
-        "$lookup: zamówienia + użytkownicy (10k)",
-        [
-            {"$sort": {"id": 1}},
-            {"$limit": 10000},
-            {
-                "$lookup": {
-                    "from": "users",
-                    "localField": "user_id",
-                    "foreignField": "id",
-                    "as": "u",
-                }
-            },
-            {"$unwind": "$u"},
-            {
-                "$project": {
-                    "_id": 0,
-                    "order_id": "$id",
-                    "status": 1,
-                    "username": "$u.username",
-                    "email": "$u.email",
-                }
-            },
-        ],
-    ),
-    "aggregate_orders_status": (
-        "Agregacja: zamówienia wg statusu",
-        [
-            {
-                "$group": {
-                    "_id": "$status",
-                    "cnt": {"$sum": 1},
-                    "avg_total": {"$avg": "$total_amount"},
-                }
-            },
-        ],
-    ),
-    "join_review_product": (
-        "$lookup: recenzje + produkty (5k)",
-        [
-            {"$sort": {"id": 1}},
-            {"$limit": 5000},
-            {
-                "$lookup": {
-                    "from": "products",
-                    "localField": "product_id",
-                    "foreignField": "id",
-                    "as": "p",
-                }
-            },
-            {"$unwind": "$p"},
-            {
-                "$project": {
-                    "_id": 0,
-                    "review_id": "$id",
-                    "rating": 1,
-                    "product_name": "$p.name",
-                    "price": "$p.price",
-                }
-            },
-        ],
-    ),
-}
-
-NEO4J_CYPHER: dict[str, tuple[str, str]] = {
-    "count_products": (
-        "MATCH (p:Product) RETURN count(p) AS c",
-        "Liczba węzłów Product",
-    ),
-    "scan_orders": (
-        "MATCH (o:Order) RETURN o.id AS id, o.user_id AS user_id, o.status AS status, o.total_amount AS total_amount ORDER BY o.id LIMIT 50000",
-        "Skan: 50k zamówień",
-    ),
-    "join_orders_users": (
-        """
-        MATCH (u:User)-[:PLACED]->(o:Order)
-        RETURN o.id AS order_id, o.status AS status, u.username AS username, u.email AS email
-        ORDER BY o.id
-        LIMIT 10000
-        """,
-        "Ścieżka: User-PLACED-Order (10k)",
-    ),
-    "aggregate_orders_status": (
-        """
-        MATCH (o:Order)
-        RETURN o.status AS status, count(o) AS cnt, avg(o.total_amount) AS avg_total
-        """,
-        "Agregacja zamówień wg statusu",
-    ),
-    "join_review_product": (
-        """
-        MATCH (r:Review)-[:REVIEWS]->(p:Product)
-        RETURN r.id AS review_id, r.rating AS rating, p.name AS product_name, p.price AS price
-        ORDER BY r.id
-        LIMIT 5000
-        """,
-        "Ścieżka: Review-REVIEWS-Product (5k)",
-    ),
-}
 
 
 def _meta_queries() -> dict[str, list[dict[str, str]]]:
-    sql_opts = [{"id": qid, "label": lab} for qid, lab, _ in SQL_DEFINITIONS]
-    mongo_opts = [{"id": k, "label": v[0]} for k, v in MONGO_PIPELINES.items()]
-    neo_opts = [{"id": k, "label": v[1]} for k, v in NEO4J_CYPHER.items()]
+    opts = [{"id": sid, "label": f"[{sid}] {label}"} for sid, label in SCENARIO_LABELS]
     return {
-        "postgres": sql_opts,
-        "mariadb": sql_opts,
-        "mongodb": mongo_opts,
-        "neo4j": neo_opts,
+        "postgres": opts,
+        "mariadb": opts,
+        "mongodb": opts,
+        "neo4j": opts,
     }
-
-
-_SQL_BY_ID = {row[0]: row[2] for row in SQL_DEFINITIONS}
 
 
 def _timed_rows(fn: Callable[[], Any]) -> tuple[float, int]:
@@ -222,26 +87,18 @@ def _timed_rows(fn: Callable[[], Any]) -> tuple[float, int]:
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     if isinstance(out, int):
         return elapsed_ms, out
-    if isinstance(out, list):
-        return elapsed_ms, len(out)
     if out is None:
         return elapsed_ms, 0
+    if isinstance(out, Sized):
+        return elapsed_ms, len(out)
     return elapsed_ms, 1
 
 
 def run_postgres(query_id: str) -> tuple[float, int]:
-    sql = _SQL_BY_ID.get(query_id)
-    if not sql:
-        raise ValueError(f"Nieznane query_id dla SQL: {query_id}")
-
     def work() -> Any:
         conn = pg8000.dbapi.connect(**PG_CONFIG)
         try:
-            cur = conn.cursor()
-            cur.execute(sql.strip())
-            rows = cur.fetchall()
-            cur.close()
-            return rows
+            return _run_sql_crud(conn, query_id, "postgres")
         finally:
             conn.close()
 
@@ -249,18 +106,10 @@ def run_postgres(query_id: str) -> tuple[float, int]:
 
 
 def run_mariadb(query_id: str) -> tuple[float, int]:
-    sql = _SQL_BY_ID.get(query_id)
-    if not sql:
-        raise ValueError(f"Nieznane query_id dla SQL: {query_id}")
-
     def work() -> Any:
         conn = mysql.connector.connect(**MARIA_CONFIG)
         try:
-            cur = conn.cursor()
-            cur.execute(sql.strip())
-            rows = cur.fetchall()
-            cur.close()
-            return rows
+            return _run_sql_crud(conn, query_id, "mariadb")
         finally:
             conn.close()
 
@@ -268,19 +117,10 @@ def run_mariadb(query_id: str) -> tuple[float, int]:
 
 
 def run_mongo(query_id: str) -> tuple[float, int]:
-    pipe_entry = MONGO_PIPELINES.get(query_id)
-    if not pipe_entry:
-        raise ValueError(f"Nieznane query_id dla MongoDB: {query_id}")
-    _, pipeline = pipe_entry
-    coll = "orders" if query_id != "count_products" else "products"
-    if query_id == "join_review_product":
-        coll = "reviews"
-
     def work() -> Any:
         client = MongoClient(MONGO_URI)
         try:
-            cur = client["ecommerce"][coll].aggregate(pipeline)
-            return list(cur)
+            return _run_mongo_crud(client["ecommerce"], query_id)
         finally:
             client.close()
 
@@ -288,21 +128,482 @@ def run_mongo(query_id: str) -> tuple[float, int]:
 
 
 def run_neo4j(query_id: str) -> tuple[float, int]:
-    entry = NEO4J_CYPHER.get(query_id)
-    if not entry:
-        raise ValueError(f"Nieznane query_id dla Neo4j: {query_id}")
-    cypher = entry[0]
-
     def work() -> Any:
         drv = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS))
         try:
             with drv.session() as session:
-                res = session.run(cypher.strip())
-                return list(res)
+                return _run_neo4j_crud(session, query_id)
         finally:
             drv.close()
 
     return _timed_rows(work)
+
+
+def _row_count(cur: Any) -> int:
+    if cur.rowcount is None or cur.rowcount < 0:
+        return 0
+    return int(cur.rowcount)
+
+
+def _next_id(cur: Any, table: str) -> int:
+    cur.execute(f"SELECT COALESCE(MAX(id), 0) + 1 FROM {table}")
+    return int(cur.fetchone()[0])
+
+
+def _run_sql_crud(conn: Any, query_id: str, engine: str) -> Any:
+    cur = conn.cursor()
+    try:
+        if query_id == "C1":
+            start = _next_id(cur, "users")
+            batch = [
+                (start + i, f"bench_c1_user_{start+i}", f"bench_c1_{start+i}@example.com")
+                for i in range(500)
+            ]
+            cur.executemany(
+                "INSERT INTO users (id, username, email) VALUES (%s, %s, %s)",
+                batch,
+            )
+            conn.commit()
+            return len(batch)
+
+        if query_id == "C2":
+            user_id, product_id = 1, 1
+            start_order = _next_id(cur, "orders")
+            start_item = _next_id(cur, "order_items")
+            orders = [(start_order + i, user_id, "PENDING", 199.99) for i in range(100)]
+            cur.executemany(
+                "INSERT INTO orders (id, user_id, status, total_amount) VALUES (%s, %s, %s, %s)",
+                orders,
+            )
+            items = []
+            for i in range(100):
+                oid = start_order + i
+                for j in range(5):
+                    items.append((start_item + (i * 5) + j, oid, product_id, 1, 39.99))
+            cur.executemany(
+                "INSERT INTO order_items (id, order_id, product_id, quantity, unit_price) VALUES (%s, %s, %s, %s, %s)",
+                items,
+            )
+            conn.commit()
+            return len(orders) + len(items)
+
+        if query_id == "C3":
+            start = _next_id(cur, "reviews")
+            batch = [(start + i, 1, 1, 5, "bench review") for i in range(500)]
+            cur.executemany(
+                "INSERT INTO reviews (id, product_id, user_id, rating, comment) VALUES (%s, %s, %s, %s, %s)",
+                batch,
+            )
+            conn.commit()
+            return len(batch)
+
+        if query_id == "C4":
+            start_cart = _next_id(cur, "carts")
+            start_item = _next_id(cur, "cart_items")
+            carts = [(start_cart + i, 1) for i in range(100)]
+            cur.executemany("INSERT INTO carts (id, user_id) VALUES (%s, %s)", carts)
+            items = []
+            for i in range(100):
+                cid = start_cart + i
+                for j in range(5):
+                    items.append((start_item + (i * 5) + j, cid, 1, 1))
+            cur.executemany(
+                "INSERT INTO cart_items (id, cart_id, product_id, quantity) VALUES (%s, %s, %s, %s)",
+                items,
+            )
+            conn.commit()
+            return len(carts) + len(items)
+
+        if query_id == "C5":
+            start_pay = _next_id(cur, "payments")
+            start_ship = _next_id(cur, "shipments")
+            payments = [(start_pay + i, 1, 120.00, "BLIK", "SUCCESS") for i in range(200)]
+            shipments = [
+                (start_ship + i, 1, f"BENCHTRK{start_ship+i:08d}", "INPOST", "IN_TRANSIT")
+                for i in range(200)
+            ]
+            cur.executemany(
+                "INSERT INTO payments (id, order_id, amount, method, status) VALUES (%s, %s, %s, %s, %s)",
+                payments,
+            )
+            cur.executemany(
+                "INSERT INTO shipments (id, order_id, tracking_number, carrier, status) VALUES (%s, %s, %s, %s, %s)",
+                shipments,
+            )
+            conn.commit()
+            return len(payments) + len(shipments)
+
+        if query_id == "C6":
+            dup_id = _next_id(cur, "users")
+            cur.execute(
+                "INSERT INTO users (id, username, email) VALUES (%s, %s, %s)",
+                (dup_id, "bench_dup", f"bench_dup_{dup_id}@example.com"),
+            )
+            conn.commit()
+            try:
+                cur.execute(
+                    "INSERT INTO users (id, username, email) VALUES (%s, %s, %s)",
+                    (dup_id, "bench_dup2", f"bench_dup2_{dup_id}@example.com"),
+                )
+                conn.commit()
+                return 0
+            except Exception:
+                conn.rollback()
+                return 1
+
+        if query_id == "R1":
+            cur.execute("SELECT id, name, price FROM products ORDER BY id LIMIT 1000")
+            return cur.fetchall()
+        if query_id == "R2":
+            cur.execute("SELECT id, user_id, status FROM orders WHERE user_id = 1 ORDER BY id LIMIT 5000")
+            return cur.fetchall()
+        if query_id == "R3":
+            cur.execute(
+                """
+                SELECT o.id, u.username, p.status
+                FROM orders o
+                JOIN users u ON u.id = o.user_id
+                JOIN payments p ON p.order_id = o.id
+                ORDER BY o.id
+                LIMIT 5000
+                """
+            )
+            return cur.fetchall()
+        if query_id == "R4":
+            cur.execute(
+                """
+                SELECT o.status, p.method, COUNT(*) AS cnt, AVG(p.amount) AS avg_amount
+                FROM orders o
+                JOIN payments p ON p.order_id = o.id
+                GROUP BY o.status, p.method
+                """
+            )
+            return cur.fetchall()
+        if query_id == "R5":
+            cur.execute("SELECT id, name, price FROM products ORDER BY price, id LIMIT 2000")
+            return cur.fetchall()
+        if query_id == "R6":
+            cur.execute(
+                """
+                SELECT u.id, o.id, oi.product_id
+                FROM users u
+                JOIN orders o ON o.user_id = u.id
+                JOIN order_items oi ON oi.order_id = o.id
+                ORDER BY u.id, o.id
+                LIMIT 5000
+                """
+            )
+            return cur.fetchall()
+
+        if query_id == "U1":
+            cur.execute("UPDATE products SET stock = CASE WHEN stock > 0 THEN stock - 1 ELSE 0 END WHERE id <= 2000")
+            conn.commit()
+            return _row_count(cur)
+        if query_id == "U2":
+            cur.execute("UPDATE orders SET status = 'SHIPPED' WHERE status = 'PENDING'")
+            conn.commit()
+            return _row_count(cur)
+        if query_id == "U3":
+            cur.execute("UPDATE products SET price = ROUND(price * 1.05, 2) WHERE category_id = 1")
+            conn.commit()
+            return _row_count(cur)
+        if query_id == "U4":
+            cur.execute("UPDATE reviews SET rating = 4, comment = 'bench update' WHERE user_id = 1 AND product_id = 1")
+            conn.commit()
+            return _row_count(cur)
+        if query_id == "U5":
+            cur.execute("UPDATE payments SET status = 'SUCCESS' WHERE status = 'FAILED'")
+            conn.commit()
+            return _row_count(cur)
+        if query_id == "U6":
+            cur.execute("UPDATE orders SET status = 'PENDING' WHERE id = 1")
+            cur.execute("UPDATE orders SET status = 'SHIPPED' WHERE id = 1")
+            cur.execute("UPDATE orders SET status = 'COMPLETED' WHERE id = 1")
+            conn.commit()
+            return 3
+
+        if query_id == "D1":
+            cur.execute("DELETE FROM cart_items WHERE cart_id IN (SELECT id FROM carts WHERE id <= 50)")
+            deleted_items = _row_count(cur)
+            cur.execute("DELETE FROM carts WHERE id <= 50")
+            deleted_carts = _row_count(cur)
+            conn.commit()
+            return deleted_items + deleted_carts
+        if query_id == "D2":
+            cur.execute("DELETE FROM reviews WHERE created_at < '2024-01-09'")
+            conn.commit()
+            return _row_count(cur)
+        if query_id == "D3":
+            cur.execute("SELECT id FROM orders WHERE status = 'CANCELLED' ORDER BY id LIMIT 200")
+            ids = [row[0] for row in cur.fetchall()]
+            if not ids:
+                return 0
+            placeholders = ",".join(["%s"] * len(ids))
+            cur.execute(f"DELETE FROM order_items WHERE order_id IN ({placeholders})", tuple(ids))
+            c1 = _row_count(cur)
+            cur.execute(f"DELETE FROM payments WHERE order_id IN ({placeholders})", tuple(ids))
+            c2 = _row_count(cur)
+            cur.execute(f"DELETE FROM shipments WHERE order_id IN ({placeholders})", tuple(ids))
+            c3 = _row_count(cur)
+            cur.execute(f"DELETE FROM orders WHERE id IN ({placeholders})", tuple(ids))
+            c4 = _row_count(cur)
+            conn.commit()
+            return c1 + c2 + c3 + c4
+        if query_id == "D4":
+            user_id = 2
+            cur.execute("SELECT id FROM orders WHERE user_id = %s LIMIT 100", (user_id,))
+            ids = [row[0] for row in cur.fetchall()]
+            deleted = 0
+            if ids:
+                placeholders = ",".join(["%s"] * len(ids))
+                cur.execute(f"DELETE FROM order_items WHERE order_id IN ({placeholders})", tuple(ids))
+                deleted += _row_count(cur)
+                cur.execute(f"DELETE FROM payments WHERE order_id IN ({placeholders})", tuple(ids))
+                deleted += _row_count(cur)
+                cur.execute(f"DELETE FROM shipments WHERE order_id IN ({placeholders})", tuple(ids))
+                deleted += _row_count(cur)
+                cur.execute(f"DELETE FROM orders WHERE id IN ({placeholders})", tuple(ids))
+                deleted += _row_count(cur)
+            cur.execute("DELETE FROM reviews WHERE user_id = %s", (user_id,))
+            deleted += _row_count(cur)
+            cur.execute("DELETE FROM cart_items WHERE cart_id IN (SELECT id FROM carts WHERE user_id = %s)", (user_id,))
+            deleted += _row_count(cur)
+            cur.execute("DELETE FROM carts WHERE user_id = %s", (user_id,))
+            deleted += _row_count(cur)
+            cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+            deleted += _row_count(cur)
+            conn.commit()
+            return deleted
+        if query_id == "D5":
+            try:
+                cur.execute("DELETE FROM products WHERE id = 1")
+                conn.commit()
+                return _row_count(cur)
+            except Exception:
+                conn.rollback()
+                return 1
+        if query_id == "D6":
+            if engine == "postgres":
+                cur.execute("UPDATE products SET name = 'SOFT_' || name WHERE id BETWEEN 10 AND 200")
+            else:
+                cur.execute("UPDATE products SET name = CONCAT('SOFT_', name) WHERE id BETWEEN 10 AND 200")
+            soft = _row_count(cur)
+            cur.execute(
+                """
+                DELETE FROM products
+                WHERE id BETWEEN 10 AND 50
+                  AND id NOT IN (
+                      SELECT DISTINCT product_id
+                      FROM order_items
+                      WHERE product_id IS NOT NULL
+                  )
+                """
+            )
+            hard = _row_count(cur)
+            conn.commit()
+            return soft + hard
+
+        raise ValueError(f"Nieznane query_id: {query_id}")
+    finally:
+        cur.close()
+
+
+def _run_mongo_crud(db: Any, query_id: str) -> Any:
+    if query_id == "C1":
+        start = (db.users.find_one(sort=[("id", -1)]) or {}).get("id", 0) + 1
+        docs = [{"id": start + i, "username": f"bench_c1_user_{start+i}", "email": f"bench_c1_{start+i}@example.com"} for i in range(500)]
+        return db.users.insert_many(docs, ordered=False).inserted_ids and len(docs)
+    if query_id == "C2":
+        start_o = (db.orders.find_one(sort=[("id", -1)]) or {}).get("id", 0) + 1
+        start_i = (db.order_items.find_one(sort=[("id", -1)]) or {}).get("id", 0) + 1
+        orders = [{"id": start_o + i, "user_id": 1, "status": "PENDING", "total_amount": 199.99} for i in range(100)]
+        db.orders.insert_many(orders, ordered=False)
+        items = []
+        for i in range(100):
+            oid = start_o + i
+            for j in range(5):
+                items.append({"id": start_i + (i * 5) + j, "order_id": oid, "product_id": 1, "quantity": 1, "unit_price": 39.99})
+        db.order_items.insert_many(items, ordered=False)
+        return len(orders) + len(items)
+    if query_id == "C3":
+        start = (db.reviews.find_one(sort=[("id", -1)]) or {}).get("id", 0) + 1
+        docs = [{"id": start + i, "product_id": 1, "user_id": 1, "rating": 5, "comment": "bench review"} for i in range(500)]
+        db.reviews.insert_many(docs, ordered=False)
+        return len(docs)
+    if query_id == "C4":
+        start_c = (db.carts.find_one(sort=[("id", -1)]) or {}).get("id", 0) + 1
+        start_i = (db.cart_items.find_one(sort=[("id", -1)]) or {}).get("id", 0) + 1
+        carts = [{"id": start_c + i, "user_id": 1} for i in range(100)]
+        db.carts.insert_many(carts, ordered=False)
+        items = []
+        for i in range(100):
+            cid = start_c + i
+            for j in range(5):
+                items.append({"id": start_i + (i * 5) + j, "cart_id": cid, "product_id": 1, "quantity": 1})
+        db.cart_items.insert_many(items, ordered=False)
+        return len(carts) + len(items)
+    if query_id == "C5":
+        start_p = (db.payments.find_one(sort=[("id", -1)]) or {}).get("id", 0) + 1
+        start_s = (db.shipments.find_one(sort=[("id", -1)]) or {}).get("id", 0) + 1
+        pays = [{"id": start_p + i, "order_id": 1, "amount": 120.0, "method": "BLIK", "status": "SUCCESS"} for i in range(200)]
+        ships = [{"id": start_s + i, "order_id": 1, "tracking_number": f"BENCHTRK{start_s+i:08d}", "carrier": "INPOST", "status": "IN_TRANSIT"} for i in range(200)]
+        db.payments.insert_many(pays, ordered=False)
+        db.shipments.insert_many(ships, ordered=False)
+        return len(pays) + len(ships)
+    if query_id == "C6":
+        start = (db.users.find_one(sort=[("id", -1)]) or {}).get("id", 0) + 1
+        db.users.insert_one({"id": start, "username": "bench_dup", "email": f"bench_dup_{start}@example.com"})
+        db.users.create_index("id", unique=True)
+        try:
+            db.users.insert_one({"id": start, "username": "bench_dup2", "email": f"bench_dup2_{start}@example.com"})
+            return 0
+        except Exception:
+            return 1
+    if query_id == "R1":
+        return list(db.products.find({}, {"_id": 0, "id": 1, "name": 1, "price": 1}).sort("id", 1).limit(1000))
+    if query_id == "R2":
+        return list(db.orders.find({"user_id": 1}, {"_id": 0, "id": 1, "status": 1}).sort("id", 1).limit(5000))
+    if query_id == "R3":
+        return list(db.orders.aggregate([
+            {"$lookup": {"from": "users", "localField": "user_id", "foreignField": "id", "as": "u"}},
+            {"$lookup": {"from": "payments", "localField": "id", "foreignField": "order_id", "as": "p"}},
+            {"$unwind": "$u"},
+            {"$unwind": "$p"},
+            {"$project": {"_id": 0, "order_id": "$id", "username": "$u.username", "payment_status": "$p.status"}},
+            {"$limit": 5000},
+        ]))
+    if query_id == "R4":
+        return list(db.payments.aggregate([
+            {"$group": {"_id": {"status": "$status", "method": "$method"}, "cnt": {"$sum": 1}, "avg_amount": {"$avg": "$amount"}}}
+        ]))
+    if query_id == "R5":
+        return list(db.products.find({}, {"_id": 0, "id": 1, "name": 1, "price": 1}).sort([("price", 1), ("id", 1)]).limit(2000))
+    if query_id == "R6":
+        return list(db.orders.aggregate([
+            {"$lookup": {"from": "users", "localField": "user_id", "foreignField": "id", "as": "u"}},
+            {"$lookup": {"from": "order_items", "localField": "id", "foreignField": "order_id", "as": "oi"}},
+            {"$unwind": "$u"},
+            {"$unwind": "$oi"},
+            {"$project": {"_id": 0, "user_id": "$u.id", "order_id": "$id", "product_id": "$oi.product_id"}},
+            {"$limit": 5000},
+        ]))
+    if query_id == "U1":
+        res = db.products.update_many({"id": {"$lte": 2000}}, [{"$set": {"stock": {"$max": [0, {"$subtract": ["$stock", 1]}]}}}])
+        return int(res.modified_count)
+    if query_id == "U2":
+        return int(db.orders.update_many({"status": "PENDING"}, {"$set": {"status": "SHIPPED"}}).modified_count)
+    if query_id == "U3":
+        res = db.products.update_many({"category_id": 1}, [{"$set": {"price": {"$round": [{"$multiply": ["$price", 1.05]}, 2]}}}])
+        return int(res.modified_count)
+    if query_id == "U4":
+        return int(db.reviews.update_many({"user_id": 1, "product_id": 1}, {"$set": {"rating": 4, "comment": "bench update"}}).modified_count)
+    if query_id == "U5":
+        return int(db.payments.update_many({"status": "FAILED"}, {"$set": {"status": "SUCCESS"}}).modified_count)
+    if query_id == "U6":
+        db.orders.update_one({"id": 1}, {"$set": {"status": "PENDING"}})
+        db.orders.update_one({"id": 1}, {"$set": {"status": "SHIPPED"}})
+        db.orders.update_one({"id": 1}, {"$set": {"status": "COMPLETED"}})
+        return 3
+    if query_id == "D1":
+        carts = [d["id"] for d in db.carts.find({"id": {"$lte": 50}}, {"_id": 0, "id": 1})]
+        a = db.cart_items.delete_many({"cart_id": {"$in": carts}}).deleted_count
+        b = db.carts.delete_many({"id": {"$in": carts}}).deleted_count
+        return int(a + b)
+    if query_id == "D2":
+        return int(db.reviews.delete_many({"created_at": {"$lt": "2024-01-09"}}).deleted_count)
+    if query_id == "D3":
+        ids = [d["id"] for d in db.orders.find({"status": "CANCELLED"}, {"_id": 0, "id": 1}).sort("id", 1).limit(200)]
+        a = db.order_items.delete_many({"order_id": {"$in": ids}}).deleted_count
+        b = db.payments.delete_many({"order_id": {"$in": ids}}).deleted_count
+        c = db.shipments.delete_many({"order_id": {"$in": ids}}).deleted_count
+        d = db.orders.delete_many({"id": {"$in": ids}}).deleted_count
+        return int(a + b + c + d)
+    if query_id == "D4":
+        user_id = 2
+        ids = [d["id"] for d in db.orders.find({"user_id": user_id}, {"_id": 0, "id": 1}).limit(100)]
+        deleted = 0
+        deleted += db.order_items.delete_many({"order_id": {"$in": ids}}).deleted_count
+        deleted += db.payments.delete_many({"order_id": {"$in": ids}}).deleted_count
+        deleted += db.shipments.delete_many({"order_id": {"$in": ids}}).deleted_count
+        deleted += db.orders.delete_many({"id": {"$in": ids}}).deleted_count
+        deleted += db.reviews.delete_many({"user_id": user_id}).deleted_count
+        carts = [d["id"] for d in db.carts.find({"user_id": user_id}, {"_id": 0, "id": 1})]
+        deleted += db.cart_items.delete_many({"cart_id": {"$in": carts}}).deleted_count
+        deleted += db.carts.delete_many({"user_id": user_id}).deleted_count
+        deleted += db.users.delete_many({"id": user_id}).deleted_count
+        return int(deleted)
+    if query_id == "D5":
+        has_refs = db.order_items.count_documents({"product_id": 1}) > 0
+        if has_refs:
+            return 1
+        return int(db.products.delete_one({"id": 1}).deleted_count)
+    if query_id == "D6":
+        soft = db.products.update_many({"id": {"$gte": 10, "$lte": 200}}, {"$set": {"soft_deleted": True}}).modified_count
+        hard = db.products.delete_many({"id": {"$gte": 10, "$lte": 50}}).deleted_count
+        return int(soft + hard)
+    raise ValueError(f"Nieznane query_id dla MongoDB: {query_id}")
+
+
+def _run_neo4j_crud(session: Any, query_id: str) -> Any:
+    if query_id == "C1":
+        return int(session.run("UNWIND range(1,500) AS i CREATE (:User {id: 100000000 + i, username: 'bench_c1_'+toString(i), email: 'bench_c1_'+toString(i)+'@example.com'}) RETURN count(*) AS c").single()["c"])
+    if query_id == "C2":
+        return int(session.run("UNWIND range(1,100) AS i MATCH (u:User {id: 1}) CREATE (o:Order {id: 200000000 + i, user_id: 1, status: 'PENDING', total_amount: 199.99}) CREATE (u)-[:PLACED]->(o) WITH o,i UNWIND range(1,5) AS j CREATE (oi:OrderItem {id: 300000000 + (i*10) + j, order_id: o.id, product_id: 1, quantity: 1, unit_price: 39.99}) CREATE (o)-[:HAS_ITEM]->(oi) RETURN count(*) AS c").single()["c"])
+    if query_id == "C3":
+        return int(session.run("UNWIND range(1,500) AS i MATCH (u:User {id: 1}), (p:Product {id: 1}) CREATE (r:Review {id: 400000000 + i, user_id: 1, product_id: 1, rating: 5, comment: 'bench review'}) CREATE (u)-[:WROTE_REVIEW]->(r) CREATE (r)-[:REVIEWS]->(p) RETURN count(r) AS c").single()["c"])
+    if query_id == "C4":
+        return int(session.run("UNWIND range(1,100) AS i MATCH (u:User {id:1}) CREATE (c:Cart {id: 500000000 + i, user_id: 1}) CREATE (u)-[:HAS_CART]->(c) WITH c,i UNWIND range(1,5) AS j MATCH (p:Product {id:1}) CREATE (ci:CartItem {id: 600000000 + (i*10) + j, cart_id: c.id, product_id: 1, quantity: 1}) CREATE (c)-[:CONTAINS]->(ci) CREATE (ci)-[:FOR_PRODUCT]->(p) RETURN count(ci) AS c").single()["c"])
+    if query_id == "C5":
+        return int(session.run("UNWIND range(1,200) AS i MATCH (o:Order {id:1}) CREATE (:Payment {id: 700000000 + i, order_id: 1, amount: 120.0, method: 'BLIK', status: 'SUCCESS'})-[:PAYS_FOR]->(o) CREATE (:Shipment {id: 800000000 + i, order_id: 1, tracking_number: 'BENCHTRK'+toString(800000000+i), carrier: 'INPOST', status: 'IN_TRANSIT'})-[:SHIPS]->(o) RETURN count(*) AS c").single()["c"])
+    if query_id == "C6":
+        session.run("MERGE (u:User {id: 900000001}) SET u.username = 'dup', u.email = 'dup@example.com'")
+        try:
+            session.run("CREATE (:User {id: 900000001, username: 'dup2', email: 'dup2@example.com'})")
+            return 0
+        except Exception:
+            return 1
+    if query_id == "R1":
+        return list(session.run("MATCH (p:Product) RETURN p.id AS id, p.name AS name, p.price AS price ORDER BY p.id LIMIT 1000"))
+    if query_id == "R2":
+        return list(session.run("MATCH (o:Order {user_id: 1}) RETURN o.id AS id, o.status AS status ORDER BY o.id LIMIT 5000"))
+    if query_id == "R3":
+        return list(session.run("MATCH (u:User)-[:PLACED]->(o:Order)<-[:PAYS_FOR]-(p:Payment) RETURN o.id AS order_id, u.username AS username, p.status AS payment_status ORDER BY o.id LIMIT 5000"))
+    if query_id == "R4":
+        return list(session.run("MATCH (p:Payment) RETURN p.status AS status, p.method AS method, count(*) AS cnt, avg(p.amount) AS avg_amount"))
+    if query_id == "R5":
+        return list(session.run("MATCH (p:Product) RETURN p.id AS id, p.name AS name, p.price AS price ORDER BY p.price, p.id LIMIT 2000"))
+    if query_id == "R6":
+        return list(session.run("MATCH (u:User)-[:PLACED]->(o:Order)-[:HAS_ITEM]->(oi:OrderItem)-[:FOR_PRODUCT]->(p:Product) RETURN u.id AS user_id, o.id AS order_id, p.id AS product_id ORDER BY u.id, o.id LIMIT 5000"))
+    if query_id == "U1":
+        return int(session.run("MATCH (p:Product) WHERE p.id <= 2000 SET p.stock = CASE WHEN p.stock > 0 THEN p.stock - 1 ELSE 0 END RETURN count(p) AS c").single()["c"])
+    if query_id == "U2":
+        return int(session.run("MATCH (o:Order {status:'PENDING'}) SET o.status = 'SHIPPED' RETURN count(o) AS c").single()["c"])
+    if query_id == "U3":
+        return int(session.run("MATCH (p:Product {category_id:1}) SET p.price = round(p.price * 1.05 * 100) / 100 RETURN count(p) AS c").single()["c"])
+    if query_id == "U4":
+        return int(session.run("MATCH (r:Review {user_id:1, product_id:1}) SET r.rating = 4, r.comment = 'bench update' RETURN count(r) AS c").single()["c"])
+    if query_id == "U5":
+        return int(session.run("MATCH (p:Payment {status:'FAILED'}) SET p.status = 'SUCCESS' RETURN count(p) AS c").single()["c"])
+    if query_id == "U6":
+        return int(session.run("MATCH (o:Order {id:1}) SET o.status='PENDING' SET o.status='SHIPPED' SET o.status='COMPLETED' RETURN count(o) AS c").single()["c"])
+    if query_id == "D1":
+        return int(session.run("MATCH (c:Cart) WHERE c.id <= 50 OPTIONAL MATCH (c)-[:CONTAINS]->(ci:CartItem) DETACH DELETE ci, c RETURN count(*) AS c").single()["c"])
+    if query_id == "D2":
+        return int(session.run("MATCH (r:Review) WHERE r.created_at < '2024-01-09' WITH collect(r) AS rs FOREACH (x IN rs | DETACH DELETE x) RETURN size(rs) AS c").single()["c"])
+    if query_id == "D3":
+        return int(session.run("MATCH (o:Order {status:'CANCELLED'}) WITH o LIMIT 200 OPTIONAL MATCH (o)-[:HAS_ITEM]->(oi:OrderItem) OPTIONAL MATCH (p:Payment)-[:PAYS_FOR]->(o) OPTIONAL MATCH (s:Shipment)-[:SHIPS]->(o) DETACH DELETE oi, p, s, o RETURN count(*) AS c").single()["c"])
+    if query_id == "D4":
+        return int(session.run("MATCH (u:User {id:2}) OPTIONAL MATCH (u)-[:PLACED]->(o:Order) OPTIONAL MATCH (o)-[:HAS_ITEM]->(oi:OrderItem) OPTIONAL MATCH (pay:Payment)-[:PAYS_FOR]->(o) OPTIONAL MATCH (ship:Shipment)-[:SHIPS]->(o) OPTIONAL MATCH (u)-[:WROTE_REVIEW]->(r:Review) OPTIONAL MATCH (u)-[:HAS_CART]->(c:Cart) OPTIONAL MATCH (c)-[:CONTAINS]->(ci:CartItem) DETACH DELETE oi, pay, ship, o, r, ci, c, u RETURN count(*) AS c").single()["c"])
+    if query_id == "D5":
+        has_ref = session.run("MATCH (oi:OrderItem {product_id:1}) RETURN count(oi) AS c").single()["c"]
+        if has_ref > 0:
+            return 1
+        return int(session.run("MATCH (p:Product {id:1}) DETACH DELETE p RETURN count(p) AS c").single()["c"])
+    if query_id == "D6":
+        soft = session.run("MATCH (p:Product) WHERE p.id >= 10 AND p.id <= 200 SET p.soft_deleted = true RETURN count(p) AS c").single()["c"]
+        hard = session.run("MATCH (p:Product) WHERE p.id >= 10 AND p.id <= 50 DETACH DELETE p RETURN count(p) AS c").single()["c"]
+        return int(soft + hard)
+    raise ValueError(f"Nieznane query_id dla Neo4j: {query_id}")
 
 
 RUNNERS = {

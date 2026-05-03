@@ -65,3 +65,11 @@ rm -r data/    # lub ręcznie usuń ten folder z eksploratora plików Windows
 ```
 
 Po usunięciu starych wolumenów wystarczy, że wystartujesz skrypt od nowa na idealnie czystych środowiskach: `docker-compose up -d` i ponownie włączysz swój skrypt `seed.py`.
+
+## Scenariusze testowe CRUD (ocena 4.0)
+
+Gotowy zestaw 24 zaawansowanych scenariuszy testowych (po 6 dla `Create`, `Read`, `Update`, `Delete`) znajduje się w pliku:
+
+- `SCENARIUSZE_TESTOWE_CRUD_4_0.md`
+
+Dokument uwzględnia wymagania poziomu 4.0: testy dla trzech rozmiarów danych, pomiary średniej z 3 prób, porównanie przed/po indeksach oraz dokumentowanie planów zapytań.
