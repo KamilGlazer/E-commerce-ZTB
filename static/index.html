@@ -26,7 +26,7 @@
       min-height: 100vh;
     }
     .wrap {
-      max-width: 960px;
+      max-width: 1200px;
       margin: 0 auto;
       padding: 2rem 1.25rem 3rem;
     }
@@ -43,6 +43,7 @@
       border-radius: 12px;
       padding: 1.25rem 1.35rem;
       margin-bottom: 1.25rem;
+      overflow-x: auto;
     }
     section h2 {
       margin: 0 0 1rem;
@@ -64,73 +65,40 @@
       font-size: 0.95rem;
     }
     .row-actions { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: flex-end; margin-top: 0.85rem; }
-    button.primary {
+    button.primary, button.secondary {
       padding: 0.55rem 1.15rem;
-      border: none;
       border-radius: 8px;
-      background: linear-gradient(180deg, var(--accent) 0%, var(--accent-dim) 100%);
-      color: #fff;
       font-weight: 600;
       cursor: pointer;
       font-size: 0.9rem;
     }
-    button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
-    button.primary:not(:disabled):hover { filter: brightness(1.08); }
-    .hint {
-      margin-top: 0.85rem;
-      font-size: 0.82rem;
-      color: var(--muted);
-      border-left: 3px solid var(--border);
-      padding-left: 0.75rem;
+    button.primary {
+      border: none;
+      background: linear-gradient(180deg, var(--accent) 0%, var(--accent-dim) 100%);
+      color: #fff;
     }
-    .engine-rows { display: flex; flex-direction: column; gap: 0.65rem; }
-    .engine-row {
-      display: grid;
-      grid-template-columns: 140px 1fr auto auto;
-      gap: 0.65rem;
-      align-items: center;
-      padding: 0.65rem 0.75rem;
+    button.secondary {
+      border: 1px solid var(--border);
       background: #131b27;
-      border-radius: 10px;
-      border: 1px solid var(--border);
-    }
-    @media (max-width: 720px) {
-      .engine-row {
-        grid-template-columns: 1fr;
-      }
-      .engine-row .dbname { margin-bottom: 0.25rem; }
-    }
-    .dbname { font-weight: 600; font-size: 0.92rem; }
-    select {
-      width: 100%;
-      padding: 0.5rem 0.65rem;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      background: #0f1419;
       color: var(--text);
-      font-size: 0.85rem;
     }
-    button.run-one {
-      padding: 0.45rem 0.85rem;
-      border-radius: 8px;
-      border: 1px solid var(--accent-dim);
-      background: transparent;
-      color: var(--accent);
-      font-weight: 600;
-      cursor: pointer;
-      font-size: 0.82rem;
-      white-space: nowrap;
-    }
-    button.run-one:disabled { opacity: 0.4; cursor: not-allowed; }
-    .timer {
-      font-variant-numeric: tabular-nums;
-      font-size: 0.88rem;
-      color: var(--muted);
-      min-width: 7rem;
-      text-align: right;
-    }
-    .timer strong { color: var(--ok); font-weight: 600; }
-    .timer.err strong { color: var(--err); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.primary:not(:disabled):hover { filter: brightness(1.08); }
+    button.secondary:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
+    .hint { margin-top: 0.85rem; font-size: 0.82rem; color: var(--muted); border-left: 3px solid var(--border); padding-left: 0.75rem; }
+    
+    table { width: 100%; border-collapse: collapse; min-width: 800px; font-size: 0.88rem; }
+    th, td { border: 1px solid var(--border); padding: 0.75rem; text-align: left; vertical-align: top; }
+    th { background: #131b27; font-weight: 600; color: var(--muted); }
+    .th-actions { margin-top: 0.5rem; }
+    .th-actions button { font-size: 0.75rem; padding: 0.3rem 0.6rem; }
+    
+    .timer { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .timer.loading { color: var(--accent); }
+    .timer.ok { color: var(--ok); }
+    .timer.err { color: var(--err); }
+    .details { font-size: 0.75rem; color: var(--muted); display: block; margin-top: 0.2rem; }
+    
     #seed-status { margin-top: 0.75rem; font-size: 0.88rem; }
     #seed-status.ok { color: var(--ok); }
     #seed-status.err { color: var(--err); }
@@ -140,30 +108,35 @@
 <body>
   <div class="wrap">
     <h1>Benchmark CRUD — 4 bazy</h1>
-    <p class="subtitle">
-      Wybierz profil <strong>size</strong> (<code>small</code> / <code>medium</code> / <code>large</code>) zgodnie ze słownikiem <code>SIZES</code> w <code>seed.py</code>.
-      Przed kolejnym pełnym zasiewem na czystych danych wyczyść wolumeny (np. <code>docker-compose down -v</code> i folder <code>data/</code>).
-    </p>
+    <p class="subtitle">Odczyty (R) uśredniane statystycznie z rozgrzewką. Zapisy (C/U/D) wykonywane pojedynczo (stanowe).</p>
 
     <section>
-      <h2>Generowanie danych</h2>
+      <h2>Generowanie danych i Indeksy</h2>
       <label for="seed-size">Profil wielkości (size)</label>
       <select id="seed-size" class="seed-size-select"></select>
       <div class="row-actions">
-        <button type="button" class="primary" id="btn-seed">Wygeneruj dane we wszystkich bazach</button>
+        <button type="button" class="primary" id="btn-seed">Zasiej dane (Seed)</button>
+        <button type="button" class="secondary" id="btn-indexes">Załóż indexy</button>
       </div>
-      <p class="hint">Profil <strong>large</strong> ma znacznie więcej wierszy — nie zamykaj karty przeglądarki do czasu odpowiedzi serwera.</p>
       <div id="seed-status"></div>
     </section>
 
     <section>
-      <h2>Scenariusze testowe CRUD + czas wykonania</h2>
-      <div class="engine-rows" id="engine-rows"></div>
+      <h2>Macierz wyników</h2>
+      <table id="results-table">
+        <thead>
+          <tr id="table-head">
+            </tr>
+        </thead>
+        <tbody id="table-body">
+            </tbody>
+      </table>
     </section>
   </div>
 
   <script>
     const API = "";
+    let metaData = null;
 
     async function fetchMeta() {
       const res = await fetch(API + "/api/meta");
@@ -177,10 +150,76 @@
       el.textContent = msg || "";
     }
 
-    function renderSizeOptions(sizes) {
+    async function runEngineQuery(engineId, queryId) {
+      const cellId = `cell-${engineId}-${queryId}`;
+      const cell = document.getElementById(cellId);
+      cell.className = "timer loading";
+      cell.innerHTML = "Wykonywanie...";
+      
+      try {
+        const res = await fetch(API + "/api/run/" + encodeURIComponent(engineId), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query_id: queryId }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || res.statusText);
+        
+        cell.className = "timer ok";
+        cell.innerHTML = `<strong>${data.median_ms} ms</strong> (P95: ${data.p95_ms} ms)<br>` +
+                         `<span class="details">Iter: ${data.iterations} | Wierszy: ${data.row_count}</span>`;
+      } catch (e) {
+        cell.className = "timer err";
+        cell.innerHTML = `<strong>Błąd</strong><br><span class="details">${e.message || e}</span>`;
+      }
+    }
+
+    async function runFullEngine(engineId, buttonEl) {
+      buttonEl.disabled = true;
+      const originalText = buttonEl.textContent;
+      buttonEl.textContent = "Przetwarzanie...";
+      
+      for (const scenario of metaData.scenarios) {
+        await runEngineQuery(engineId, scenario.id);
+      }
+      
+      buttonEl.disabled = false;
+      buttonEl.textContent = originalText;
+    }
+
+    function buildTable(meta) {
+      metaData = meta;
+      
+      // Budowanie nagłówka
+      const thead = document.getElementById("table-head");
+      let headHtml = `<th>Scenariusz</th>`;
+      meta.engines.forEach(eng => {
+        headHtml += `
+          <th>
+            ${eng.label}
+            <div class="th-actions">
+              <button class="primary" onclick="runFullEngine('${eng.id}', this)">Uruchom wszystko</button>
+            </div>
+          </th>`;
+      });
+      thead.innerHTML = headHtml;
+
+      // Budowanie ciała tabeli
+      const tbody = document.getElementById("table-body");
+      let bodyHtml = "";
+      meta.scenarios.forEach(scen => {
+        bodyHtml += `<tr><td><strong>[${scen.id}]</strong> ${scen.label}</td>`;
+        meta.engines.forEach(eng => {
+           bodyHtml += `<td id="cell-${eng.id}-${scen.id}" class="timer">—</td>`;
+        });
+        bodyHtml += `</tr>`;
+      });
+      tbody.innerHTML = bodyHtml;
+      
+      // Select
       const sel = document.getElementById("seed-size");
       sel.innerHTML = "";
-      sizes.forEach((s) => {
+      meta.sizes.forEach((s) => {
         const opt = document.createElement("option");
         opt.value = s.id;
         opt.textContent = s.label;
@@ -188,73 +227,13 @@
       });
     }
 
-    function rowTimerEl(row) {
-      return row.querySelector(".timer");
-    }
-
-    async function runEngine(engine, row) {
-      const sel = row.querySelector("select");
-      const btn = row.querySelector("button.run-one");
-      const qid = sel.value;
-      const timerEl = rowTimerEl(row);
-      btn.disabled = true;
-      timerEl.innerHTML = "…";
-      timerEl.classList.remove("err");
-      try {
-        const res = await fetch(API + "/api/run/" + encodeURIComponent(engine), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query_id: qid }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.detail || res.statusText);
-        timerEl.innerHTML =
-          "<strong>" + data.elapsed_ms + " ms</strong> · wierszy: " + data.row_count;
-      } catch (e) {
-        timerEl.classList.add("err");
-        timerEl.innerHTML = "<strong>Błąd</strong> · " + (e.message || e);
-      }
-      btn.disabled = false;
-    }
-
-    function buildRow(meta, engine) {
-      const queries = meta.queries_by_engine[engine] || [];
-      const div = document.createElement("div");
-      div.className = "engine-row";
-      div.dataset.engine = engine;
-      div.innerHTML =
-        '<div class="dbname"></div>' +
-        '<select></select>' +
-        '<button type="button" class="run-one">Uruchom</button>' +
-        '<div class="timer">—</div>';
-      div.querySelector(".dbname").textContent = meta.engines.find((e) => e.id === engine).label;
-
-      const sel = div.querySelector("select");
-      queries.forEach((q) => {
-        const opt = document.createElement("option");
-        opt.value = q.id;
-        opt.textContent = q.label;
-        sel.appendChild(opt);
-      });
-
-      div.querySelector("button.run-one").addEventListener("click", () => runEngine(engine, div));
-      return div;
-    }
-
     (async () => {
       try {
         const meta = await fetchMeta();
-        renderSizeOptions(meta.sizes || []);
-        const host = document.getElementById("engine-rows");
-        host.innerHTML = "";
-        meta.engines.forEach((e) => host.appendChild(buildRow(meta, e.id)));
+        buildTable(meta);
 
         document.getElementById("btn-seed").addEventListener("click", async () => {
           const size = document.getElementById("seed-size").value;
-          if (!size) {
-            setSeedStatus("err", "Wybierz profil size.");
-            return;
-          }
           const btn = document.getElementById("btn-seed");
           btn.disabled = true;
           setSeedStatus("work", "Generowanie danych — proszę czekać…");
@@ -265,24 +244,31 @@
               body: JSON.stringify({ size }),
             });
             const data = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail) || res.statusText);
-            setSeedStatus(
-              "ok",
-              data.message +
-                " Produkty: " +
-                data.cfg.products +
-                ", zamówienia: " +
-                data.cfg.orders +
-                ", …"
-            );
+            if (!res.ok) throw new Error(data.detail || res.statusText);
+            setSeedStatus("ok", data.message + ` (Prod: ${data.cfg.products}, Zam: ${data.cfg.orders})`);
           } catch (e) {
             setSeedStatus("err", String(e.message || e));
           }
           btn.disabled = false;
         });
+
+        document.getElementById("btn-indexes").addEventListener("click", async () => {
+          const btnIdx = document.getElementById("btn-indexes");
+          btnIdx.disabled = true;
+          setSeedStatus("work", "Zakładanie indeksów benchmarkowych…");
+          try {
+            const res = await fetch(API + "/api/indexes", { method: "POST" });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data.ok) throw new Error(data.message || res.statusText);
+            setSeedStatus("ok", data.message);
+          } catch (e) {
+            setSeedStatus("err", String(e.message || e));
+          }
+          btnIdx.disabled = false;
+        });
       } catch (e) {
-        document.getElementById("engine-rows").innerHTML =
-          '<p style="color:var(--err)">Nie udało się połączyć z API. Uruchom serwer: <code>uvicorn benchmark_server:app --host 127.0.0.1 --port 8765</code></p>';
+        document.getElementById("seed-status").className = "err";
+        document.getElementById("seed-status").textContent = "Błąd komunikacji z API. Sprawdź, czy serwer działa.";
       }
     })();
   </script>

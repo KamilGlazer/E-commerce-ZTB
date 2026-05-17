@@ -9,7 +9,7 @@ from pathlib import Path
 from collections.abc import Sized
 from typing import Any, Callable, Literal
 
-import pg8000.dbapi
+import psycopg
 import mysql.connector
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -81,62 +81,104 @@ def _meta_queries() -> dict[str, list[dict[str, str]]]:
     }
 
 
-def _timed_rows(fn: Callable[[], Any]) -> tuple[float, int]:
-    t0 = time.perf_counter()
-    out = fn()
-    elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    if isinstance(out, int):
-        return elapsed_ms, out
-    if out is None:
-        return elapsed_ms, 0
-    if isinstance(out, Sized):
-        return elapsed_ms, len(out)
-    return elapsed_ms, 1
+def _execute_timed(query_id: str, work_fn: Callable[[], Any]) -> dict[str, Any]:
+    """
+    R (Read) - wykonuje warm-up + 50 iteracji (zwraca medianę i p95)
+    C/U/D (Create/Update/Delete) - wykonuje 1 iterację (chroni przed błędami spójności)
+    """
+    is_read = query_id.startswith("R")
+    
+    def _extract_rows(out_data: Any) -> int:
+        if isinstance(out_data, int):
+            return out_data
+        if out_data is None:
+            return 0
+        if isinstance(out_data, Sized):
+            return len(out_data)
+        return 1
+
+    if not is_read:
+        # Mutacje stanu wywołujemy TYLKO RAZ
+        t0 = time.perf_counter()
+        out = work_fn()
+        ms = (time.perf_counter() - t0) * 1000.0
+        return {
+            "median_ms": round(ms, 3),
+            "p95_ms": round(ms, 3),
+            "iterations": 1,
+            "row_count": _extract_rows(out),
+        }
+
+    # Warm-up (rozgrzanie cache silnika DB / planów zapytań)
+    work_fn()
+
+    # 50 prób dla stabilnego pomiaru
+    times = []
+    rows = 0
+    for i in range(50):
+        t0 = time.perf_counter()
+        out = work_fn()
+        t_ms = (time.perf_counter() - t0) * 1000.0
+        times.append(t_ms)
+        if i == 0:
+            rows = _extract_rows(out)
+
+    times.sort()
+    median = times[len(times) // 2]
+    p95 = times[int(len(times) * 0.95)]
+    
+    return {
+        "median_ms": round(median, 3),
+        "p95_ms": round(p95, 3),
+        "iterations": 50,
+        "row_count": rows,
+    }
 
 
-def run_postgres(query_id: str) -> tuple[float, int]:
-    def work() -> Any:
-        conn = pg8000.dbapi.connect(**PG_CONFIG)
-        try:
+def run_postgres(query_id: str) -> dict[str, Any]:
+    pg_kwargs = PG_CONFIG.copy()
+    pg_kwargs["dbname"] = pg_kwargs.pop("database")
+    
+    # Otwarte poza timerem, żeby nie wliczać czasu TCP handshake'a
+    conn = psycopg.connect(**pg_kwargs)
+    try:
+        def work() -> Any:
             return _run_sql_crud(conn, query_id, "postgres")
-        finally:
-            conn.close()
+        return _execute_timed(query_id, work)
+    finally:
+        conn.close()
 
-    return _timed_rows(work)
 
-
-def run_mariadb(query_id: str) -> tuple[float, int]:
-    def work() -> Any:
-        conn = mysql.connector.connect(**MARIA_CONFIG)
-        try:
+def run_mariadb(query_id: str) -> dict[str, Any]:
+    conn = mysql.connector.connect(**MARIA_CONFIG)
+    try:
+        def work() -> Any:
             return _run_sql_crud(conn, query_id, "mariadb")
-        finally:
-            conn.close()
-
-    return _timed_rows(work)
-
-
-def run_mongo(query_id: str) -> tuple[float, int]:
-    def work() -> Any:
-        client = MongoClient(MONGO_URI)
-        try:
-            return _run_mongo_crud(client["ecommerce"], query_id)
-        finally:
-            client.close()
-
-    return _timed_rows(work)
+        return _execute_timed(query_id, work)
+    finally:
+        conn.close()
 
 
-def run_neo4j(query_id: str) -> tuple[float, int]:
-    def work() -> Any:
-        drv = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS))
-        try:
+def run_mongo(query_id: str) -> dict[str, Any]:
+    client = MongoClient(MONGO_URI)
+    try:
+        db = client["ecommerce"]
+        def work() -> Any:
+            return _run_mongo_crud(db, query_id)
+        return _execute_timed(query_id, work)
+    finally:
+        client.close()
+
+
+def run_neo4j(query_id: str) -> dict[str, Any]:
+    drv = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS))
+    try:
+        def work() -> Any:
             with drv.session() as session:
                 return _run_neo4j_crud(session, query_id)
-        finally:
-            drv.close()
-
-    return _timed_rows(work)
+        return _execute_timed(query_id, work)
+    finally:
+        drv.close()
 
 
 def _row_count(cur: Any) -> int:
@@ -606,6 +648,119 @@ def _run_neo4j_crud(session: Any, query_id: str) -> Any:
     raise ValueError(f"Nieznane query_id dla Neo4j: {query_id}")
 
 
+_BENCH_SQL_INDEXES: list[str] = [
+    "CREATE INDEX IF NOT EXISTS bench_idx_orders_user_id ON orders(user_id)",
+    "CREATE INDEX IF NOT EXISTS bench_idx_orders_status ON orders(status)",
+    "CREATE INDEX IF NOT EXISTS bench_idx_products_category_id ON products(category_id)",
+    "CREATE INDEX IF NOT EXISTS bench_idx_products_price_id ON products(price, id)",
+    "CREATE INDEX IF NOT EXISTS bench_idx_order_items_order_id ON order_items(order_id)",
+    "CREATE INDEX IF NOT EXISTS bench_idx_order_items_product_id ON order_items(product_id)",
+    "CREATE INDEX IF NOT EXISTS bench_idx_payments_order_id ON payments(order_id)",
+    "CREATE INDEX IF NOT EXISTS bench_idx_payments_status ON payments(status)",
+    "CREATE INDEX IF NOT EXISTS bench_idx_payments_status_method ON payments(status, method)",
+    "CREATE INDEX IF NOT EXISTS bench_idx_shipments_order_id ON shipments(order_id)",
+    "CREATE INDEX IF NOT EXISTS bench_idx_reviews_created_at ON reviews(created_at)",
+    "CREATE INDEX IF NOT EXISTS bench_idx_reviews_user_product ON reviews(user_id, product_id)",
+    "CREATE INDEX IF NOT EXISTS bench_idx_cart_items_cart_id ON cart_items(cart_id)",
+    "CREATE INDEX IF NOT EXISTS bench_idx_carts_user_id ON carts(user_id)",
+]
+
+
+_BENCH_MONGO_INDEX_SPECS: list[tuple[str, str, list[tuple[str, int]]]] = [
+    ("orders", "bench_orders_user_id", [("user_id", 1)]),
+    ("orders", "bench_orders_status", [("status", 1)]),
+    ("products", "bench_products_category_id", [("category_id", 1)]),
+    ("products", "bench_products_price_id", [("price", 1), ("id", 1)]),
+    ("order_items", "bench_order_items_order_id", [("order_id", 1)]),
+    ("order_items", "bench_order_items_product_id", [("product_id", 1)]),
+    ("payments", "bench_payments_order_id", [("order_id", 1)]),
+    ("payments", "bench_payments_status", [("status", 1)]),
+    ("payments", "bench_payments_status_method", [("status", 1), ("method", 1)]),
+    ("shipments", "bench_shipments_order_id", [("order_id", 1)]),
+    ("reviews", "bench_reviews_created_at", [("created_at", 1)]),
+    ("reviews", "bench_reviews_user_product", [("user_id", 1), ("product_id", 1)]),
+    ("cart_items", "bench_cart_items_cart_id", [("cart_id", 1)]),
+    ("carts", "bench_carts_user_id", [("user_id", 1)]),
+]
+
+_BENCH_NEO4J_INDEXES: list[str] = [
+    "CREATE INDEX bench_order_user_id IF NOT EXISTS FOR (o:Order) ON (o.user_id)",
+    "CREATE INDEX bench_order_status IF NOT EXISTS FOR (o:Order) ON (o.status)",
+    "CREATE INDEX bench_product_category_id IF NOT EXISTS FOR (p:Product) ON (p.category_id)",
+    "CREATE INDEX bench_product_price_id IF NOT EXISTS FOR (p:Product) ON (p.price, p.id)",
+    "CREATE INDEX bench_order_item_order_id IF NOT EXISTS FOR (oi:OrderItem) ON (oi.order_id)",
+    "CREATE INDEX bench_order_item_product_id IF NOT EXISTS FOR (oi:OrderItem) ON (oi.product_id)",
+    "CREATE INDEX bench_payment_order_id IF NOT EXISTS FOR (p:Payment) ON (p.order_id)",
+    "CREATE INDEX bench_payment_status IF NOT EXISTS FOR (p:Payment) ON (p.status)",
+    "CREATE INDEX bench_payment_status_method IF NOT EXISTS FOR (p:Payment) ON (p.status, p.method)",
+    "CREATE INDEX bench_shipment_order_id IF NOT EXISTS FOR (s:Shipment) ON (s.order_id)",
+    "CREATE INDEX bench_review_created_at IF NOT EXISTS FOR (r:Review) ON (r.created_at)",
+    "CREATE INDEX bench_review_user_product IF NOT EXISTS FOR (r:Review) ON (r.user_id, r.product_id)",
+    "CREATE INDEX bench_cart_item_cart_id IF NOT EXISTS FOR (ci:CartItem) ON (ci.cart_id)",
+    "CREATE INDEX bench_cart_user_id IF NOT EXISTS FOR (c:Cart) ON (c.user_id)",
+]
+
+
+def _apply_sql_indexes(conn: Any) -> int:
+    cur = conn.cursor()
+    try:
+        for ddl in _BENCH_SQL_INDEXES:
+            cur.execute(ddl)
+        conn.commit()
+        return len(_BENCH_SQL_INDEXES)
+    finally:
+        cur.close()
+
+
+def create_postgres_indexes() -> int:
+    pg_kwargs = PG_CONFIG.copy()
+    pg_kwargs["dbname"] = pg_kwargs.pop("database")
+    conn = psycopg.connect(**pg_kwargs)
+    try:
+        return _apply_sql_indexes(conn)
+    finally:
+        conn.close()
+
+
+def create_mariadb_indexes() -> int:
+    conn = mysql.connector.connect(**MARIA_CONFIG)
+    try:
+        return _apply_sql_indexes(conn)
+    finally:
+        conn.close()
+
+
+def create_mongo_indexes() -> int:
+    client = MongoClient(MONGO_URI)
+    try:
+        db = client["ecommerce"]
+        for coll_name, index_name, key in _BENCH_MONGO_INDEX_SPECS:
+            db[coll_name].create_index(key, name=index_name)
+        return len(_BENCH_MONGO_INDEX_SPECS)
+    finally:
+        client.close()
+
+
+def create_neo4j_indexes() -> int:
+    drv = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS))
+    try:
+        with drv.session() as session:
+            for cypher in _BENCH_NEO4J_INDEXES:
+                session.run(cypher)
+            session.run("CALL db.awaitIndexes()") # Czekamy aż Neo4j asynchronicznie skończy
+        return len(_BENCH_NEO4J_INDEXES)
+    finally:
+        drv.close()
+
+
+INDEX_CREATORS = {
+    "postgres": create_postgres_indexes,
+    "mariadb": create_mariadb_indexes,
+    "mongodb": create_mongo_indexes,
+    "neo4j": create_neo4j_indexes,
+}
+
+
 RUNNERS = {
     "postgres": run_postgres,
     "mariadb": run_mariadb,
@@ -662,9 +817,31 @@ def api_meta() -> dict[str, Any]:
             {"id": k, "label": DISPLAY_NAMES[k]}
             for k in ["postgres", "mariadb", "mongodb", "neo4j"]
         ],
-        "queries_by_engine": _meta_queries(),
+        "scenarios": [{"id": sid, "label": label} for sid, label in SCENARIO_LABELS],
         "sizes": _sizes_meta(),
     }
+
+
+@app.post("/api/indexes")
+def api_create_indexes() -> dict[str, Any]:
+    results: dict[str, Any] = {}
+    for engine, fn in INDEX_CREATORS.items():
+        try:
+            count = fn()
+            results[engine] = {"ok": True, "indexes": count}
+        except Exception as exc:
+            results[engine] = {"ok": False, "error": str(exc)}
+    all_ok = all(r.get("ok") for r in results.values())
+    total = sum(r.get("indexes", 0) for r in results.values() if r.get("ok"))
+    if all_ok:
+        message = (
+            f"Indeksy benchmarkowe założone we wszystkich bazach "
+            f"(łącznie {total} definicji). Uruchom ponownie scenariusze, aby porównać czasy."
+        )
+    else:
+        failed = [DISPLAY_NAMES[e] for e, r in results.items() if not r.get("ok")]
+        message = f"Błąd w: {', '.join(failed)}. Sprawdź, czy kontenery DB działają."
+    return {"ok": all_ok, "results": results, "message": message}
 
 
 @app.post("/api/seed")
@@ -688,7 +865,7 @@ def api_run(engine: str, body: RunQueryRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"Nieznany silnik: {engine}")
     runner = RUNNERS[engine]
     try:
-        ms, rows = runner(body.query_id)
+        res = runner(body.query_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as exc:
@@ -696,9 +873,9 @@ def api_run(engine: str, body: RunQueryRequest) -> dict[str, Any]:
 
     return {
         "engine": engine,
-        "engine_label": DISPLAY_NAMES[engine],
         "query_id": body.query_id,
-        "elapsed_ms": round(ms, 3),
-        "row_count": rows,
+        "median_ms": res["median_ms"],
+        "p95_ms": res["p95_ms"],
+        "iterations": res["iterations"],
+        "row_count": res["row_count"],
     }
-
